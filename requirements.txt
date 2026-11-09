@@ -1,0 +1,8 @@
+agentdojo==0.1.35
+anthropic>=0.40
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+pyyaml>=6.0
+rdflib>=7.0
+pytest>=8.0

@@ -1,0 +1,134 @@
+# ===================================================================================
+#  CARS / "Learning the Wrong Lesson" - experiment configuration
+#  The ONLY thing you must change: put your Anthropic API key below
+#  (or leave it and `export ANTHROPIC_API_KEY=...` in your shell instead).
+#
+#  Evaluation design (see README section 5):
+#    E0  real Claude agent, measures how often injections actually steer it (compliance).
+#        This is both a finding and the calibration source for the assume-breach layer.
+#    E3/E2/E4/E7  assume-breach: the agent follows the injection at a documented compliance
+#        level (swept, with the E0 point marked), so the six post-breach policies can be
+#        compared. Runs in the real AgentDojo environment with the real gate and shadow twins.
+#    E5  real Claude agent, benign tasks only: the R1 safety invariant and utility.
+#  Only E0 and E5 call Claude when attacker.mode is ucb_template (the default). The
+#  assume-breach sweeps make no API calls, so the whole campaign is cheap (~$2-3).
+# ===================================================================================
+anthropic_api_key: "PASTE_YOUR_ANTHROPIC_API_KEY_HERE"
+
+agentdojo_version: "v1.2.2"
+workers: null          # parallel processes for the no-API assume-breach runs (null = CPU cores - 1)
+
+# Target agent (the system being defended)
+agent:
+  model: claude-haiku-5-5
+  profile: default     # default | permissive (stress condition: agent acts on instructions found in documents)
+  temperature: 0.0
+  max_tokens: 1024
+  max_iters: 15
+
+# Learning attacker
+attacker:
+  mode: ucb_template   # ucb_template (no API, recommended: Claude refuses to write injections)
+                       #   | ucb_llm (bandit picks avenue, Claude writes text) | llm (Claude does both)
+  v_att: 0.1           # probability the attacker verifies a reported success out of band
+  generalize: 0.2      # P(an exposure transfers to another session's decoy identity, pop on)
+
+# E0: real-agent compliance calibration (THIS is the real agent layer and the only attack-side
+# API cost with ucb_template). Measures per-avenue and pooled P(agent attempts the goal).
+e0:
+  suites: [banking, workspace]
+  reps: 2                 # repetitions per (avenue x user_task); more -> tighter compliance CI
+  max_user_tasks: 4       # user tasks per split per suite (fit + held-out = 2x this); null = all
+  min_n_per_avenue: 30    # per-avenue rates are reported only with at least this many episodes
+
+# E3 / P3: assume-breach compliance sweep (no API cost with ucb_template)
+e3:
+  suites: [banking, workspace]
+  policies: [block, static_honeytool, fixed_shaping, fixed_matched, state_consistent_adaptive, cars_noverif, cars]
+  attacker_algos: [UCB1, Thompson, EXP3, Suspicious-UCB, Skeptical-UCB]   # live bandit comparison (calibrated condition)
+  sweep_algos: [UCB1]          # algorithms used at the sweep levels (sensitivity only)
+  compliance_sweep: [0.1, 0.25, 0.5, 0.75, 1.0]   # conditional stress test (sensitivity, option A)
+  # + a 'calibrated' condition added automatically once E0 exists: compliance drawn per run from
+  #   the E0 Beta posterior (uncertainty propagated). All policies share the same draws (paired).
+  seeds: 20
+  rounds: 30
+  n_attackers: 1
+  llm_model: claude-haiku-5-5    # only used if attacker.mode is an llm mode
+
+# E3v / P1 live: verification sweep (no API cost). Tests the theory's prediction that CARS's
+# credibility constraints matter only when attackers verify. Levels are fixed in advance;
+# report every cell.
+e3v:
+  enabled: true
+  suites: [banking, workspace]
+  policies: [block, fixed_shaping, fixed_matched, state_consistent_adaptive, cars_noverif, cars]
+  attacker_algos: [UCB1, Skeptical-UCB]   # Skeptical-UCB removes the optimism that flatters rotation
+  compliance: [0.5, 1.0]
+  v_att_levels: [0.1, 0.3, 0.5, 0.8]
+  seeds: 20
+  rounds: 30
+
+# E2 / P2 live: collective verification at an equal total budget (assume-breach)
+e2:
+  suite: banking
+  policies: [cars_minus_pop, cars]
+  # equal TOTAL rounds in every arm. Contrasts:
+  #   [4,stats] vs [4,none]  : effect of more observations (shared statistics, no decoy identities)
+  #   [4,memory] vs [4,stats]: effect of sharing decoy identities over and above more observations
+  #   [1,none]               : one attacker who sees every observation itself
+  configs: [[1, none], [4, none], [4, stats], [4, memory]]
+  attacker_algos: [UCB1, Thompson]
+  total_rounds: 40
+  seeds: 30
+  compliance: 0.6        # documented conditional stress level (not tuned to E0)
+  mode: ucb_template
+  v_att: 0.2
+
+# E4 live ablation (optional; synthetic E4 is the main ablation)
+e4:
+  enabled: false
+  suite: banking
+  policies: [cars, cars_minus_stat, cars_minus_sem, cars_minus_ver, cars_minus_pop]
+  attacker_algo: UCB1
+  seeds: 6
+  rounds: 30
+  n_attackers: 4
+  sharing: memory
+  compliance: 0.6
+  v_att: 0.2
+
+# E7 live ontology check on a system the knowledge layer never modelled (assume-breach)
+e7:
+  enabled: true
+  suite: slack
+  policies: [cars_flat_kb, cars, cars_oracle_kb]
+  vhat_grid: [0.02, 0.05, 0.1, 0.2, 0.5]   # decision audit grid
+  attacker_algo: UCB1
+  seeds: 10
+  rounds: 30
+  compliance: 0.6
+  v_att: 0.2
+
+# E5: benign workload, real agent. clean = all user tasks, no injection anywhere;
+# contaminated = same legitimate tasks with untrusted injected data present (false routing)
+e5:
+  suites: [banking, workspace]
+  policies: [block, static_honeytool, fixed_shaping, fixed_matched, state_consistent_adaptive, cars_noverif, cars]
+  contaminated:
+    enabled: true
+    max_user_tasks: 6
+    n_avenues: 2
+
+# E6 operational value (computed from E3 logs)
+e6:
+  triage_minutes_per_alert: 4      # analyst time per labelled alert (assumption; adjust)
+
+# Hard spending cap: the run stops (and can be resumed) once this is reached
+budget:
+  max_usd: 15
+
+# USD per million tokens (Anthropic list prices, Nov 2026; update if prices change)
+pricing:
+  claude-haiku-5-5:  {input: 0.10, output: 0.50, cache_write: 0.125, cache_read: 0.01}
+  claude-sonnet-5-5: {input: 2.00, output: 10.0, cache_write: 2.50,  cache_read: 0.10}
+  claude-opus-5-5:   {input: 4.00, output: 20.0, cache_write: 5.00,  cache_read: 0.20}
